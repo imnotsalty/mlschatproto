@@ -1,0 +1,6 @@
+[theme]
+primaryColor="#003366"           # Dark Blue for main interactive elements
+backgroundColor="#FFFFFF"         # Main background is white
+secondaryBackgroundColor="#F0F2F6" # Light gray for message bubbles & inputs
+textColor="#003366"               # Dark blue for all text
+font="sans serif"
