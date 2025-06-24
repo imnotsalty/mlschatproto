@@ -38,6 +38,98 @@ def get_gemini_model(api_key):
     model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[process_user_request])
     return model
 
+def categorize_request(model, user_prompt: str) -> str:
+    """
+    NEW: Uses the LLM to categorize the user's request into a predefined category.
+    """
+    CATEGORIES = ["just_listed", "just_sold", "open_house", "general_property_ad", "other"]
+
+    categorize = genai.protos.FunctionDeclaration(
+        name="set_design_category",
+        description="Sets the category for the design request.",
+        parameters=genai.protos.Schema(
+            type=genai.protos.Type.OBJECT,
+            properties={"category": genai.protos.Schema(type=genai.protos.Type.STRING, enum=CATEGORIES)},
+            required=["category"]
+        )
+    )
+    categorization_model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[categorize])
+    prompt = f'Analyze the user\'s request and categorize it. User Request: "{user_prompt}"'
+
+    try:
+        response = categorization_model.generate_content(prompt)
+        part = response.candidates[0].content.parts[0]
+        if hasattr(part, 'function_call') and part.function_call.name == "set_design_category":
+            return dict(part.function_call.args).get("category", "general_property_ad")
+        return "general_property_ad"
+    except Exception as e:
+        print(f"Error during categorization: {e}")
+        return "general_property_ad"
+
+def create_modifications_for_template(model, listing_data: dict, template_details: dict) -> list | None:
+    """
+    Looks at a SINGLE template's layers and finds corresponding data in the MLS listing blob.
+    """
+    create_modifications = genai.protos.FunctionDeclaration(
+        name="create_modifications",
+        description="Creates a list of modifications for a template based on property data.",
+        parameters=genai.protos.Schema(
+            type=genai.protos.Type.OBJECT,
+            properties={
+                "modifications": genai.protos.Schema(
+                    type=genai.protos.Type.ARRAY,
+                    description="The list of modifications mapping property data to template layers.",
+                    items=genai.protos.Schema(
+                        type=genai.protos.Type.OBJECT,
+                        properties={
+                            "name": genai.protos.Schema(type=genai.protos.Type.STRING),
+                            "text": genai.protos.Schema(type=genai.protos.Type.STRING),
+                            "image_url": genai.protos.Schema(type=genai.protos.Type.STRING)
+                        },
+                        required=["name"]
+                    )
+                )
+            },
+            required=["modifications"]
+        )
+    )
+
+    mapping_model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[create_modifications])
+
+    prompt = f"""
+    You are an expert data mapper. Your only job is to create a list of modifications for a given template using provided property data.
+
+    **RULES (Follow these exactly):**
+    1.  **Iterate Through Layers:** Look at each layer present in the `TEMPLATE_DETAILS`.
+    2.  **Find the Data:** For each layer, find the most logical corresponding value in the `PROPERTY_DATA`.
+        -   The `name` in the modification MUST BE the layer name from `TEMPLATE_DETAILS`.
+        -   The value (`text` or `image_url`) MUST COME FROM `PROPERTY_DATA`.
+    3.  **IGNORE UNMATCHED DATA:** If a field exists in `PROPERTY_DATA` but there is no logical layer for it in `TEMPLATE_DETAILS`, you MUST ignore that data.
+    4.  **IGNORE UNFILLED LAYERS:** If a layer in `TEMPLATE_DETAILS` has no logical corresponding value in `PROPERTY_DATA`, you MUST simply skip it.
+    5.  **Call the Function:** You must call the `create_modifications` function with the list of modifications you were able to create.
+
+    **TEMPLATE_DETAILS:**
+    {json.dumps(template_details, indent=2)}
+
+    **PROPERTY_DATA:**
+    {json.dumps(listing_data, indent=2)}
+    """
+
+    try:
+        response = mapping_model.generate_content(prompt, request_options={"timeout": 60})
+        part = response.candidates[0].content.parts[0]
+        if hasattr(part, 'function_call') and part.function_call.name == "create_modifications":
+            raw_modifications = part.function_call.args.get("modifications")
+            # FIXED: Convert the API's special object into a standard Python list of dicts to prevent the TypeError.
+            if not raw_modifications: return []
+            python_modifications = [dict(mod.items()) for mod in raw_modifications]
+            return python_modifications
+        return None
+    except Exception as e:
+        print(f"Error during Gemini mapping for template {template_details.get('uid')}: {e}")
+        return None
+
+
 def generate_gemini_response(model, chat_history, user_prompt, rich_templates_data, current_design_context):
     """Generates a response from the AI, which now acts as a workflow controller."""
     
@@ -62,8 +154,8 @@ def generate_gemini_response(model, chat_history, user_prompt, rich_templates_da
     **CRITICAL SCENARIOS & RULES:**
 
     --- START OF SURGICAL ADDITIONS ---
-    - **[NEW TOP-PRIORITY RULE] MLS ID FIRST:** If a user asks to create a listing flyer/ad, your ABSOLUTE FIRST response_text MUST ALWAYS ALWAYS be asking for the MLS ID by setting the CONVERSE action. This overrides all other behavior. The prompt MUST be: "Great! To get started quickly, can you provide the MLS ID for the property?".
-
+    - **[NEW TOP-PRIORITY RULE] MLS ID FIRST:** If a user asks to create a listing flyer/ad (e.g., "i want a just listed a" or "make a flyer"), your ABSOLUTE FIRST response_text MUST ALWAYS ALWAYS be asking for the MLS ID by setting the CONVERSE action. This overrides all other behavior. The prompt MUST be: "Great! To get started quickly, can you provide the MLS ID for the property?". **If the user responds that they do not have an MLS ID (e.g., "no", "I don't have one"), your next action is to use CONVERSE again and your `response_text` must be: "No problem. What is the property address to get started?"**
+    
     - **[NEW TOP-PRIORITY RULE] MULTI-PART UPDATES & BULLET POINTS:** If a user provides multiple pieces of information in a single message (e.g., 'the address is 123 Main St, price is $500k, features are 3 bed 2 bath'), you MUST identify and include ALL of them in a single `MODIFY` action's `modifications` array. If they ask for "bullet points", format the text with a bullet (•) and newline (`\\n`) for each item (e.g., "• 3 bed\\n• 2 bath").
     
     - **[NEW RULE] HANDLING IMAGE UPDATES & UPLOADER AWARENESS:** If the user asks to change a photo or logo, you MUST NOT ask for a URL. Instead, use the `CONVERSE` action and instruct them to use the file uploader. Your `response_text` MUST BE: "You can upload an image for that! Please use the 'Attach an image' button below the text box, and then tell me what that image is for (e.g., 'this is the agent photo')."
