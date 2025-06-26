@@ -35,7 +35,7 @@ def get_gemini_model(api_key):
         )
     )
 
-    model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[process_user_request])
+    model = genai.GenerativeModel(model_name="gemini-2.0-flash", tools=[process_user_request])
     return model
 
 def categorize_request(model, user_prompt: str) -> str:
@@ -53,7 +53,7 @@ def categorize_request(model, user_prompt: str) -> str:
             required=["category"]
         )
     )
-    categorization_model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[categorize])
+    categorization_model = genai.GenerativeModel(model_name="gemini-2.0-flash", tools=[categorize])
     prompt = f'Analyze the user\'s request and categorize it. User Request: "{user_prompt}"'
 
     try:
@@ -94,7 +94,7 @@ def create_modifications_for_template(model, listing_data: dict, template_detail
         )
     )
 
-    mapping_model = genai.GenerativeModel(model_name="gemini-1.5-flash", tools=[create_modifications])
+    mapping_model = genai.GenerativeModel(model_name="gemini-2.0-flash", tools=[create_modifications])
 
     prompt = f"""
     You are an expert data mapper. Your only job is to create a list of modifications for a given template using provided property data.
